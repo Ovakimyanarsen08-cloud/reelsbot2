@@ -1,6 +1,7 @@
 import os
 import asyncio
 import logging
+import base64
 from pathlib import Path
 import yt_dlp
 import imageio_ffmpeg
@@ -20,6 +21,30 @@ logger = logging.getLogger(__name__)
 VIDEO_DIR = Path("videos")
 VIDEO_DIR.mkdir(exist_ok=True)
 
+# Папка для cookies
+COOKIE_DIR = Path("cookies")
+COOKIE_DIR.mkdir(exist_ok=True)
+COOKIE_FILE = COOKIE_DIR / "cookies.txt"
+
+def setup_cookies():
+    """Создаем файл cookies из переменной окружения"""
+    cookies_b64 = os.environ.get('COOKIES_B64')
+    if not cookies_b64:
+        logger.warning("⚠️ COOKIES_B64 не установлена - Instagram может блокировать запросы")
+        return False
+    
+    try:
+        # Декодируем из base64
+        cookies_data = base64.b64decode(cookies_b64)
+        # Сохраняем в файл
+        with open(COOKIE_FILE, 'wb') as f:
+            f.write(cookies_data)
+        logger.info("✅ Cookies успешно созданы")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Ошибка создания cookies: {e}")
+        return False
+
 def _ffmpeg_path() -> str:
     """Путь к ffmpeg из imageio-ffmpeg."""
     try:
@@ -30,8 +55,12 @@ def _ffmpeg_path() -> str:
 def download_video_blocking(url: str) -> str:
     """Скачиваем видео с уникальным именем и ремультиплексируем в mp4."""
     ffmpeg_path = _ffmpeg_path()
+    
+    # Проверяем, есть ли cookies файл
+    use_cookies = COOKIE_FILE.exists() and os.path.getsize(COOKIE_FILE) > 0
+    
     ydl_opts = {
-        "outtmpl": str(VIDEO_DIR / "%(id)s.%(ext)s"),  # Уникальное имя: videos/<id>.mp4
+        "outtmpl": str(VIDEO_DIR / "%(id)s.%(ext)s"),
         "format": "mp4/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best",
         "merge_output_format": "mp4",
         "noplaylist": True,
@@ -39,6 +68,12 @@ def download_video_blocking(url: str) -> str:
         "no_warnings": True,
         "ffmpeg_location": ffmpeg_path,
     }
+    
+    # Добавляем cookies если они есть
+    if use_cookies:
+        ydl_opts["cookiefile"] = str(COOKIE_FILE)
+        logger.info("Использую cookies для скачивания")
+    
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
         filename = ydl.prepare_filename(info)
@@ -70,7 +105,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await notice.edit_text("✅ Готово!")
     except Exception as e:
         logger.exception("Ошибка при скачивании/отправке:")
-        await notice.edit_text(f"❌ Ошибка: {e}")
+        error_msg = f"❌ Ошибка: {e}"
+        
+        # Более понятное сообщение об ошибке cookies
+        if "cookies" in str(e).lower() or "login" in str(e).lower():
+            error_msg += "\n\n⚠️ Instagram требует авторизации. Нужно обновить cookies."
+            
+        await notice.edit_text(error_msg)
     finally:
         try:
             if "path" in locals() and os.path.exists(path):
@@ -79,6 +120,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
 def main():
+    # Настраиваем cookies при старте
+    setup_cookies()
+    
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
